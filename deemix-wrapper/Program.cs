@@ -1,63 +1,102 @@
 ﻿using System.Diagnostics;
 using System.Net.Http.Json;
+using System.Reflection.Metadata;
 using System.Text.Json.Serialization;
 using System.Web;
+using Sharprompt;
 
 namespace deemix_wrapper;
 
-record DeezerResponse
+internal record DeezerResponse
 {
-    [JsonPropertyName("data")] public IEnumerable<DeezerTrackData> Data { get; init; }
+    // ReSharper disable UnusedAutoPropertyAccessor.Global
+    [JsonPropertyName("data")] public IEnumerable<DeezerTrackData>? Data { get; set; }
 }
 
-record DeezerTrackData
+internal record DeezerTrackData
 {
-    [JsonPropertyName("id")] public int ID { get; init; }
-    [JsonPropertyName("title")] public string Title { get; init; }
-    [JsonPropertyName("artist")] public Artist Artist { get; init; }
-    [JsonPropertyName("link")] public string Link { get; init; }
+    [JsonPropertyName("title")] public string? Title { get; set; }
+    [JsonPropertyName("artist")] public Artist? Artist { get; set; }
+    [JsonPropertyName("link")] public string? Link { get; set; }
+    [JsonPropertyName("album")] public AlbumData? Album { get; set; }
+}
+
+record AlbumData
+{
+    [JsonPropertyName("cover_big")] public string? AlbumCover { get; set; }
 }
 
 public record Artist
 {
-    [JsonPropertyName("name")] public string Name { get; init; }
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    // ReSharper restore UnusedAutoPropertyAccessor.Global
 }
 
-internal static class Program
+public static class Program
 {
     private const string DeezerApiUrl = "https://api.deezer.com/search/track?q={0}&limit=10";
     private static readonly HttpClient Client = new();
+    private static bool _syncSpotify = true;
+    private static void Exiting() => Console.CursorVisible = true;
+
+    private static void HandleSelectionChange(Track newTrack)
+    {
+        var albumThumbnail = newTrack.AlbumThumbnail;
+        if (albumThumbnail is not null)
+            Process.Start("viu", new[] { albumThumbnail }).WaitForExitAsync();
+    }
+
     private static async Task Main(string[] args)
     {
-        List<string> downloadLinks = new();
+        // This is a bug in the SWAN Logging library, need this hack to bring back the cursor
+        AppDomain.CurrentDomain.ProcessExit += (sender, e) => Exiting();
+        
+        if (args.Contains("--no-sync"))
+            _syncSpotify = false;
 
-        foreach (var trackTitle in args)
+        if (_syncSpotify)
+            await Spotify.Init();
+        
+        
+        List<Track> selectedSongs = new();
+        foreach (var trackTitle in args.Where(song => song != "--no-sync"))
         {
             var requestUri = string.Format(DeezerApiUrl, HttpUtility.UrlEncode(trackTitle));
             var response = await Client.GetFromJsonAsync<DeezerResponse>(requestUri);
-                if (response?.Data == null) throw new Exception("Empty response");
+            if (response?.Data == null) throw new Exception("Received an empty response from deezer API.");
 
-                foreach (var (item, i) in response.Data.Select((value, i) => (value, i)))
-                {
-                    Console.WriteLine($"{i + 1}: {item.Artist.Name} - {item.Title} => {item.Link}");
-                }
-                
-                Console.Write("Selected song: ");
-                var choice = int.Parse(Console.ReadLine()!.Normalize());
+            if (!response.Data.Any())
+            {
+                Console.WriteLine($"No songs found matching the given title: \"{trackTitle}\"");
+                continue;
+            }
 
-                try
-                {
-                    var chosenTrack = response.Data.ToList()[choice-1];
-                    Console.WriteLine($"Chosen track: {chosenTrack.Artist.Name} - {chosenTrack.Title} => {chosenTrack.Link}");
-                    downloadLinks.Add(chosenTrack.Link);
-                }
-                catch (ArgumentOutOfRangeException)
-                {
-                    Console.WriteLine("Invalid choice.");
-                    Environment.Exit(1);
-                }
+            var songs = response.Data.Select(song => new Track(Artist: song.Artist?.Name, Title: song.Title, Link: song.Link, thumbnail: song.Album?.AlbumCover)).ToList();
         }
 
-        await Process.Start("deemix", downloadLinks).WaitForExitAsync();
+        if (selectedSongs.Count == 0)
+        {
+            Console.WriteLine("No songs to download. Exiting...");
+            Environment.Exit(0);
+        }
+
+        if (_syncSpotify)
+            await Spotify.AddToPlaylist(selectedSongs);
+        
+        await Process.Start("deemix", selectedSongs.Select(s => s.Link)!).WaitForExitAsync();
+    }
+
+
+    public record Track(string? Title, string? Artist, string? Link, string? thumbnail)
+    {
+        public readonly string? Artist = Artist;
+        public readonly string? Title = Title;
+        public readonly string? Link = Link;
+        public readonly string? AlbumThumbnail = thumbnail;
+
+        public override string ToString()
+        {
+            return $"{Artist} - {Title}";
+        }
     }
 }
